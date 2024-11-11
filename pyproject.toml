@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "workplace"
+version = "0.1.0"
+description = "Converts Workplace json to tabular data"
+authors = ["Dan King <dan@traffyk.ai>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.13"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
