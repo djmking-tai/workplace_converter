@@ -2,8 +2,6 @@ import os
 import json
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from copy import deepcopy
 import os
 import json
 import pandas as pd
@@ -33,6 +31,17 @@ def read_json_files(root_dir):
                         except json.JSONDecodeError as e:
                             print(f"Error reading {filepath}: {e}")
     return data
+
+def is_redundant_record(prev_record, current_record):
+    """Check if the current record is redundant with the previous record"""
+    if not prev_record or not current_record:
+        return False
+    for key, value in current_record.items():
+        if not value:
+            continue
+        if key not in prev_record or prev_record[key] != value:
+            return False
+    return True
 
 def extract_data(data, file_name = ""):
     records = []
@@ -65,17 +74,11 @@ def extract_data(data, file_name = ""):
             for nested_item in vec_items:
                 process_data({'label_values': [nested_item]}, base_record.copy(), key_name)
 
-    def has_nested_dict(dict_items):
-        """Check if there are nested dictionaries in the dict_items"""
-        for entry in dict_items:
-            if 'dict' in entry:
-                return True
-        return False
-
-    def process_dict_items(dict_items, base_record, ent_field_name, labels, parent_title=None):
+    def process_dict_items(dict_items, base_record, ent_field_name, labels, parent_title=None, depth=0):
         """Helper function to process dictionary items recursively"""
-        has_nested = has_nested_dict(dict_items)
-        current_record = base_record.copy()
+        # if not has_nested:
+        #     has_nested = has_nested_dict(dict_items)
+        current_record = base_record if depth == 0 else base_record.copy()
         
         # Add parent title to record if it exists
         if parent_title:
@@ -98,7 +101,7 @@ def extract_data(data, file_name = ""):
             elif 'dict' in entry:
                 nested_labels = labels + [temp_label or current_field_name]
                 process_dict_items(entry['dict'], current_record, current_field_name, 
-                                nested_labels, parent_title)
+                                nested_labels, parent_title, depth=depth+1)
             # Handle leaf values
             else:
                 if labels:
@@ -106,10 +109,10 @@ def extract_data(data, file_name = ""):
                 else:
                     key = tuple([current_field_name, temp_label]) if temp_label else tuple([current_field_name, current_field_name])
                 
-                check_exists_append(current_record, key, value, columns, force_new=has_nested)
+                check_exists_append(current_record, key, value, columns, force_new=depth > 0)
         
         # Only append if record has data
-        if len(current_record) > 0:
+        if depth > 0 and current_record not in records and dict_items:
             records.append(current_record)
 
     def process_data(item, parent_record, parent_labels):
@@ -146,21 +149,24 @@ def extract_data(data, file_name = ""):
                     process_dict_items(lv['dict'], record, ent_field_name, 
                                     labels if labels else key_name,
                                     dict_title)
-                    # If dict is empty but has title, create a record with just the title
-                    if not lv['dict'] and dict_title:
-                        title_record = record.copy()
-                        title_key = tuple([ent_field_name, 'title'])
-                        check_exists_append(title_record, title_key, dict_title, columns, is_title=True)
-                        records.append(title_record)
-                    continue  # Skip the final record append as it's handled in process_dict_items
+                    # # If dict is empty but has title, create a record with just the title
+                    # if not lv['dict'] and dict_title:
+                    #     title_record = record.copy()
+                    #     title_key = tuple([ent_field_name, 'title'])
+                    #     check_exists_append(title_record, title_key, dict_title, columns, is_title=True)
+                    #     records.append(title_record)
+                    # continue  # Skip the final record append as it's handled in process_dict_items
 
         else:
             # Handle case for generic JSON file
             for key, value in item.items():
                 check_exists_append(record, tuple([key]), value, columns)
 
+        if len(records) > 0 and is_redundant_record(records[-1], record):
+            return
+
         # Only append if record has data and is not already included
-        if len(record) > 0 and record not in records:
+        if len(record) > 0:
             records.append(record.copy())
 
     # Iterate through data
@@ -255,3 +261,8 @@ def convert_to_pkl(root_dir):
 if __name__ == "__main__":
     root_dir = 'Workplace Data Company Information'
     convert_to_pkl(root_dir)
+    # file_dir = 'Workplace Data Company Information/organization/company_info_1.json'
+    # # file_dir = 'Workplace Data Company Information/groups/people_sets_1.json'
+    # temp_data = read_json_files(file_dir)
+    # temp_records = extract_data(temp_data)
+    # temp_records.to_csv(file_dir.split('/')[-1].replace('.json', '.csv'))
