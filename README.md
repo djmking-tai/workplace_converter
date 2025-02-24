@@ -16,7 +16,7 @@ This code was written for the analysis and conversion of JSON datasets related t
 ```
 workplace_converter/
 ├── meta_workplace_converter.py
-├── README2.md
+├── README.md
 ├── poetry.lock
 └── pyproject.toml
 ```
