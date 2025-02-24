@@ -68,6 +68,12 @@ def extract_data(data, file_name = ""):
                 record[key] = value
                 columns.add(key)
 
+    def convert_record_list_to_string(record):
+        for key, value in record.items():
+            if isinstance(value, list):
+                record[key] = str(value)
+        return record
+
     def process_vec_items(vec_items, base_record, key_name, parent_labels):
         """Helper function to process vector items recursively"""
         if vec_items:
@@ -76,8 +82,6 @@ def extract_data(data, file_name = ""):
 
     def process_dict_items(dict_items, base_record, ent_field_name, labels, parent_title=None, depth=0):
         """Helper function to process dictionary items recursively"""
-        # if not has_nested:
-        #     has_nested = has_nested_dict(dict_items)
         current_record = base_record if depth == 0 else base_record.copy()
         
         # Add parent title to record if it exists
@@ -110,9 +114,10 @@ def extract_data(data, file_name = ""):
                     key = tuple([current_field_name, temp_label]) if temp_label else tuple([current_field_name, current_field_name])
                 
                 check_exists_append(current_record, key, value, columns, force_new=depth > 0)
-        
+
         # Only append if record has data
-        if depth > 0 and current_record not in records and dict_items:
+        if depth > 0 and dict_items:
+            current_record = convert_record_list_to_string(current_record)
             records.append(current_record)
 
     def process_data(item, parent_record, parent_labels):
@@ -149,13 +154,6 @@ def extract_data(data, file_name = ""):
                     process_dict_items(lv['dict'], record, ent_field_name, 
                                     labels if labels else key_name,
                                     dict_title)
-                    # # If dict is empty but has title, create a record with just the title
-                    # if not lv['dict'] and dict_title:
-                    #     title_record = record.copy()
-                    #     title_key = tuple([ent_field_name, 'title'])
-                    #     check_exists_append(title_record, title_key, dict_title, columns, is_title=True)
-                    #     records.append(title_record)
-                    # continue  # Skip the final record append as it's handled in process_dict_items
 
         else:
             # Handle case for generic JSON file
@@ -167,6 +165,7 @@ def extract_data(data, file_name = ""):
 
         # Only append if record has data and is not already included
         if len(record) > 0:
+            record = convert_record_list_to_string(record)
             records.append(record.copy())
 
     # Iterate through data
@@ -215,7 +214,7 @@ def extract_data(data, file_name = ""):
         
         return final_df
     
-    return create_multiindex_df(records)
+    return create_multiindex_df(records).drop_duplicates()
 
 
 def convert_to_pkl(root_dir):
@@ -261,8 +260,3 @@ def convert_to_pkl(root_dir):
 if __name__ == "__main__":
     root_dir = 'Workplace Data Company Information'
     convert_to_pkl(root_dir)
-    # file_dir = 'Workplace Data Company Information/organization/company_info_1.json'
-    # # file_dir = 'Workplace Data Company Information/groups/people_sets_1.json'
-    # temp_data = read_json_files(file_dir)
-    # temp_records = extract_data(temp_data)
-    # temp_records.to_csv(file_dir.split('/')[-1].replace('.json', '.csv'))

@@ -1,44 +1,73 @@
-# workplace_converter
+# Workplace Converter
+
+## Description
+
+This code was written for the analysis and conversion of JSON datasets related to workplace data for a client. The primary purpose is to read JSON files, extract relevant data, and convert it into structured formats like CSV and PKL for further analysis.
 
 ## Features
-- Convert JSON files to tabular format.
-- Search for specific strings within JSON files.
-- Convert JSON files to pickle format for efficient storage and retrieval.
+
+- **Read JSON Files**: Recursively read JSON files from a specified directory.
+- **Extract Data**: Extract and process data from JSON files into structured records.
+- **Convert to DataFrame**: Convert extracted records into a Pandas DataFrame with MultiIndex columns.
+- **Save as PKL and CSV**: Save the DataFrame as both PKL and CSV files.
 
 ## Project Structure
+
 ```
 workplace_converter/
-├── dev_notebook.ipynb
-├── README.md
+├── meta_workplace_converter.py
+├── README2.md
+├── poetry.lock
+└── pyproject.toml
 ```
 
 ## Key Functions
 
-### `search_strings_in_json(directory, strings_to_find)`
-Search for specific strings within JSON files in a directory.
-- **Parameters**:
-  - `directory`: Path to the directory containing JSON files.
-  - `strings_to_find`: List of strings to search for.
-- **Returns**: List of tuples with file paths and matching strings.
-
 ### `read_json_files(root_dir)`
-Read JSON files from a directory.
-- **Parameters**:
-  - `root_dir`: Path to the directory or JSON file.
-- **Returns**: Dictionary with file names and their JSON content.
 
-### `extract_data(data)`
-Extract data from JSON content into a tabular format.
-- **Parameters**:
-  - `data`: Dictionary with JSON content.
-- **Returns**: Pandas DataFrame with extracted data.
+Reads JSON files from the specified directory and returns a dictionary of the data.
 
-### `convert_to_csv(root_dir)`
-Convert JSON files in a directory to pickle format.
-- **Parameters**:
-  - `root_dir`: Path to the directory containing JSON files.
+**Parameters:**
+- `root_dir`: Path to the directory containing JSON files.
+
+**Returns:** 
+- Dictionary containing the JSON data.
+
+
+### `extract_data(data, file_name="")`
+
+Extracts and processes data from the given JSON data into structured records.
+
+**Parameters:**
+- `data`: The JSON data to be processed.
+- `file_name`: Optional file name for reference.
+
+**Returns:** 
+- Pandas DataFrame with MultiIndex columns.
+
+### `convert_to_pkl(root_dir)`
+
+Converts JSON files in the specified directory to PKL and CSV formats.
+
+**Parameters:**
+- `root_dir`: Path to the directory containing JSON files.
+
+**Returns:** 
+- None. Saves the converted files to the output directory.
 
 ## Notes
-- Ensure all JSON files are UTF-8 encoded.
-- Handle errors gracefully when reading malformed JSON files.
-- Use appropriate directories for different types of JSON data.
+
+- The code handles nested structures within JSON files, including vectors and dictionaries.
+- The output directory structure mirrors the input directory structure, with a suffix `_pkl_converted`.
+- The code ensures that redundant records are not appended to the final DataFrame.
+
+## How to use
+- Make sure you have [Poetry](https://python-poetry.org/) installed, then navigate to the project directory and run:
+  ```
+  poetry install
+  ```
+- To convert your workplace data, put your folder containing the workplace JSON files in the project root directory, rename the `root_dir` in the second last line of [meta_workplace_converter.py](/meta_workplace_converter.py) to your folder name, and run 
+  ```
+  python meta_workplace_converter.py
+  ```
+  The extracted files will be saved to a new folder named `<your_workplace_data_folder_name>_pkl_converted` in both `.pkl` and `.csv` formats.
