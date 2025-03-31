@@ -37,7 +37,7 @@ def is_redundant_record(prev_record, current_record):
     if not prev_record or not current_record:
         return False
     for key, value in current_record.items():
-        if not value:
+        if not value or "title" in key:
             continue
         if key not in prev_record or prev_record[key] != value:
             return False
@@ -89,6 +89,10 @@ def extract_data(data, file_name = ""):
             title_key = tuple([ent_field_name, 'title'])
             check_exists_append(current_record, title_key, parent_title, columns, is_title=True)
         
+        # Store nested structures to process later
+        deferred_processing = []
+        
+        # First pass: process all direct value fields
         for entry in dict_items:
             value = entry.get('value') or entry.get('timestamp_value')
             temp_label = entry.get('label', '')
@@ -97,6 +101,20 @@ def extract_data(data, file_name = ""):
             # If there's an ent_field_name in the entry, use it
             current_field_name = nested_ent_field_name if nested_ent_field_name else ent_field_name
             
+            # Defer processing of nested structures
+            if 'vec' in entry or 'dict' in entry:
+                deferred_processing.append((entry, temp_label, current_field_name))
+            # Handle leaf values immediately
+            else:
+                if labels:
+                    key = tuple(labels + [temp_label or current_field_name])
+                else:
+                    key = tuple([current_field_name, temp_label]) if temp_label else tuple([current_field_name, current_field_name])
+                
+                check_exists_append(current_record, key, value, columns, force_new=depth > 0)
+        
+        # Second pass: process all deferred nested structures
+        for entry, temp_label, current_field_name in deferred_processing:
             # Handle nested vectors within dictionary
             if 'vec' in entry:
                 nested_key_name = labels + [temp_label or current_field_name]
@@ -105,16 +123,8 @@ def extract_data(data, file_name = ""):
             elif 'dict' in entry:
                 nested_labels = labels + [temp_label or current_field_name]
                 process_dict_items(entry['dict'], current_record, current_field_name, 
-                                nested_labels, parent_title, depth=depth+1)
-            # Handle leaf values
-            else:
-                if labels:
-                    key = tuple(labels + [temp_label or current_field_name])
-                else:
-                    key = tuple([current_field_name, temp_label]) if temp_label else tuple([current_field_name, current_field_name])
+                                nested_labels, entry.get('title'), depth=depth+1)
                 
-                check_exists_append(current_record, key, value, columns, force_new=depth > 0)
-
         # Only append if record has data
         if depth > 0 and dict_items:
             current_record = convert_record_list_to_string(current_record)
@@ -133,18 +143,29 @@ def extract_data(data, file_name = ""):
         # Process 'label_values'
         label_values = item.get('label_values', [])
         if label_values:
+            # Store nested structures to process later
+            deferred_processing = []
+            
+            # First pass: process all direct value fields
             for lv in label_values:
                 ent_field_name = lv.get('ent_field_name', '')
                 label = lv.get('label', '')
                 key_name = [ent_field_name, label] if label else [ent_field_name, ent_field_name]
                 
-                if 'value' in lv or 'timestamp_value' in lv:
+                # If it has nested structures, defer processing
+                if 'vec' in lv or 'dict' in lv:
+                    deferred_processing.append((lv, key_name, ent_field_name))
+                # Handle leaf values immediately
+                elif 'value' in lv or 'timestamp_value' in lv:
                     value = lv.get('value') or lv.get('timestamp_value')
                     if labels:
                         check_exists_append(record, tuple(labels), value, columns)
                     else:
                         check_exists_append(record, tuple(key_name), value, columns)
-                elif 'vec' in lv:
+            
+            # Second pass: process all deferred nested structures
+            for lv, key_name, ent_field_name in deferred_processing:
+                if 'vec' in lv:
                     # Handle vector items recursively
                     process_vec_items(lv['vec'], record, key_name, labels)
                 elif 'dict' in lv:
@@ -250,13 +271,14 @@ def convert_to_pkl(root_dir):
                 
                 # Save each DataFrame in the dictionary
                 output_filename = file.replace('.json', '.pkl')
-                output_csv_filename = file.replace('.json', '.csv')
+                output_excel_filename = file.replace('.json', '.excel')
                 output_path = os.path.join(output_root, output_filename)
-                output_csv_path = os.path.join(output_root, output_csv_filename)
+                output_excel_path = os.path.join(output_root, output_excel_filename)
                 temp_records.to_pickle(output_path, protocol=pickle.HIGHEST_PROTOCOL)
-                temp_records.to_csv(output_csv_path)
+                temp_records.to_excel(output_excel_path)
                 print(f"Saved {output_path}")
 
 if __name__ == "__main__":
-    root_dir = 'Workplace Data Company Information'
+    # root_dir = 'Workplace Data Company Information'
+    root_dir = "user-information"
     convert_to_pkl(root_dir)
