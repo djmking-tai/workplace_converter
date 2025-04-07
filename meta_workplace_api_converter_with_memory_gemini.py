@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 warnings.filterwarnings("ignore")
 
 # --- Helper Function to Optimize Data Types (Simplified) ---
-# Keeping the simplified version as aggressive downcasting caused errors
 def optimize_dtypes(df):
     if df.empty: return df
     for col in df.columns:
@@ -22,25 +21,30 @@ def optimize_dtypes(df):
                 is_unhashable_sample = False
                 sample_size = min(1000, len(df[col]))
                 if sample_size > 0:
+                    # Check if any item in the sample is a list or dict
                     is_unhashable_sample = df[col].iloc[:sample_size].apply(lambda x: isinstance(x, (list, dict))).any()
 
                 if not is_unhashable_sample:
                     num_unique_values = len(df[col].unique())
                     num_total_values = len(df[col])
                     # Convert to category if low cardinality or few unique values, and seems hashable
-                    if num_total_values > 0 and (num_unique_values / num_total_values < 0.5 or num_unique_values < 100):
+                    if num_total_values > 0 and (num_unique_values / num_total_values < 0.1):
                        df[col] = df[col].astype('category')
             except TypeError: pass # Contains unhashable types, skip category conversion
             except Exception: pass # Other errors during unique() or type checking, skip
-        # Add more specific type conversions if needed (e.g., pd.to_datetime, pd.to_numeric)
-        # Example: Convert potential datetime strings
-        # elif 'time' in col.lower() or 'date' in col.lower():
-        #     try:
-        #         df[col] = pd.to_datetime(df[col], errors='coerce')
-        #     except Exception: pass # Ignore conversion errors
+        # Example: Convert potential datetime strings (optional, can be done later)
+        elif 'time' in col.lower() or 'date' in col.lower():
+            try:
+                # Attempt conversion, coerce errors to NaT (Not a Time)
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+                # Optional: Convert to Arrow timestamp if needed for Parquet efficiency
+                # if pd.api.types.is_datetime64_any_dtype(df[col]):
+                #    df[col] = pd.Series(pa.array(df[col].astype(int) // 10**6, type=pa.timestamp('ms'))) # Example ms
+            except Exception: pass # Ignore conversion errors
     return df
 
 # --- Processing Function for Group Data (Feed items) ---
+# (No changes needed in this function)
 def process_json_group_data(json_data, group_lookup):
     all_feed_items_list = [] # Accumulates feed items for the *entire file*
     if group_lookup is None: group_lookup = {}
@@ -88,6 +92,7 @@ def process_json_group_data(json_data, group_lookup):
     return group_lookup, all_feed_items_list
 
 # --- Processing Function for Member Conversation Messages ---
+# (No changes needed in this function)
 def process_json_member_conversation_data(json_data, member_lookup):
     all_messages_list = [] # Accumulates messages for the *entire file*
     if member_lookup is None: member_lookup = {}
@@ -130,10 +135,16 @@ def process_json_member_conversation_data(json_data, member_lookup):
 
     return member_lookup, all_messages_list
 
-# --- Processing Function for Member Data (Feed & Conversation Metadata) ---
+# --- Processing Function for Member Data (Feed, Conversation Metadata, AND Events) ---
 def process_json_member_data(json_data, member_lookup):
+    """
+    Processes member data: updates lookup, flattens feeds and events using
+    json_normalize, manually creates conversation metadata. Returns LISTS
+    of member feed dicts, conversation metadata dicts, and member event dicts.
+    """
     all_member_feeds_list = []
     all_conversations_metadata_list = []
+    all_member_events_list = [] # <<< NEW list for events
     if member_lookup is None: member_lookup = {}
 
     for member_id, member_data in json_data.items():
@@ -146,7 +157,7 @@ def process_json_member_data(json_data, member_lookup):
         if not isinstance(existing_conv_ids, list): existing_conv_ids = [existing_conv_ids]
         existing_conv_ids_set = set(existing_conv_ids)
 
-        # --- Process feed items for THIS member ---
+        # --- Process feed items for THIS member (Same as before) ---
         feed_items_raw = member_data.get('feed', [])
         if isinstance(feed_items_raw, list):
             valid_feed_items = []
@@ -172,7 +183,7 @@ def process_json_member_data(json_data, member_lookup):
                 except Exception as e:
                     print(f"  Warning: json_normalize failed for feed for member {member_id}: {e}")
 
-        # --- Process conversations metadata (Manual creation) ---
+        # --- Process conversations metadata (Manual creation - Same as before) ---
         conversations_raw = member_data.get('conversations', [])
         if isinstance(conversations_raw, list):
             for conv in conversations_raw:
@@ -194,6 +205,33 @@ def process_json_member_data(json_data, member_lookup):
                 }
                 all_conversations_metadata_list.append(conversation_record)
 
+        # --- NEW: Process events for THIS member ---
+        events_raw = member_data.get('events', [])
+        if isinstance(events_raw, list) and events_raw:
+            # Filter for valid dicts, although normalize might handle some errors
+            valid_events = [evt for evt in events_raw if isinstance(evt, dict)]
+            if valid_events:
+                try:
+                    member_events_df_chunk = pd.json_normalize(valid_events, sep='_')
+                    member_events_df_chunk['member_id'] = member_id # Add member ID
+
+                    # Handle potential nested structures remaining after normalize (convert to string)
+                    for col in member_events_df_chunk.columns:
+                        # Check a sample for performance
+                        sample_size = min(100, len(member_events_df_chunk[col]))
+                        if sample_size > 0 and member_events_df_chunk[col].iloc[:sample_size].apply(lambda x: isinstance(x, (list, dict))).any():
+                            try:
+                                member_events_df_chunk[col] = member_events_df_chunk[col].astype(str) # Convert complex types to string
+                            except Exception:
+                                pass # Ignore conversion errors for specific columns
+
+                    chunk_dicts = member_events_df_chunk.to_dict(orient='records')
+                    all_member_events_list.extend(chunk_dicts)
+                except Exception as e:
+                    print(f"  Warning: json_normalize failed for events for member {member_id}: {e}")
+
+
+        # --- Process managers and groups lists (Same as before) ---
         managers_raw = member_data.get('managers', [])
         if isinstance(managers_raw, list):
             manager_ids_chunk = [m['id'] for m in managers_raw if isinstance(m, dict) and 'id' in m]
@@ -201,14 +239,19 @@ def process_json_member_data(json_data, member_lookup):
         if isinstance(groups_raw, list):
             group_ids_chunk = [g['id'] for g in groups_raw if isinstance(g, dict) and 'id' in g]
 
+        # --- Update member_lookup (Same as before) ---
         member_lookup[member_id]['feed_ids'] = feed_ids_chunk or None
         member_lookup[member_id]['manager_ids'] = manager_ids_chunk or None
         member_lookup[member_id]['group_ids'] = group_ids_chunk or None
         member_lookup[member_id]['conversation_ids'] = list(existing_conv_ids_set) or None
+        # Note: We don't store event_ids in the lookup by default, but could if needed.
 
-    return member_lookup, all_member_feeds_list, all_conversations_metadata_list
+    # <<< Return the new events list as well
+    return member_lookup, all_member_feeds_list, all_conversations_metadata_list, all_member_events_list
 
-# --- NEW Processing Function for Post Data (Comments, Reactions, Seen) ---
+
+# --- Processing Function for Post Data (Comments, Reactions, Seen) ---
+# (No changes needed in this function)
 def process_json_post_data(json_data):
     """
     Processes post data (comments, reactions, seen), flattens comments
@@ -231,7 +274,8 @@ def process_json_post_data(json_data):
                     comments_df_chunk['post_id'] = post_id
                     # Handle potential list types after normalize (e.g., message_tags)
                     for col in comments_df_chunk.columns:
-                        if comments_df_chunk[col].apply(lambda x: isinstance(x, list)).any():
+                        # More robust check across the whole column if performance allows, else sample
+                        if comments_df_chunk[col].dtype == 'object' and comments_df_chunk[col].apply(lambda x: isinstance(x, list)).any():
                              comments_df_chunk[col] = comments_df_chunk[col].astype(str) # Convert list cols to string for Parquet
                     chunk_dicts = comments_df_chunk.to_dict(orient='records')
                     all_comments_list.extend(chunk_dicts)
@@ -241,7 +285,6 @@ def process_json_post_data(json_data):
         # --- Process Reactions ---
         reactions_raw = post_content.get('reactions', [])
         if isinstance(reactions_raw, list) and reactions_raw:
-            # Assuming reactions are simple dicts {id, type}
             valid_reactions = [r for r in reactions_raw if isinstance(r, dict)]
             if valid_reactions:
                 try:
@@ -252,11 +295,9 @@ def process_json_post_data(json_data):
                 except Exception as e:
                      print(f"  Warning: Failed processing reactions for post {post_id}: {e}")
 
-
         # --- Process Seen ---
         seen_raw = post_content.get('seen', [])
         if isinstance(seen_raw, list) and seen_raw:
-            # Assuming seen are simple dicts {id, seen_time}
             valid_seen = [s for s in seen_raw if isinstance(s, dict)]
             if valid_seen:
                 try:
@@ -267,10 +308,10 @@ def process_json_post_data(json_data):
                 except Exception as e:
                     print(f"  Warning: Failed processing seen for post {post_id}: {e}")
 
-
     return all_comments_list, all_reactions_list, all_seen_list
 
-# --- NEW Processing Function for Post Summaries ---
+# --- Processing Function for Post Summaries ---
+# (No changes needed in this function)
 def process_json_post_summaries(json_data):
     """
     Processes post summary data, flattens using json_normalize,
@@ -279,29 +320,25 @@ def process_json_post_summaries(json_data):
     all_summaries_list = []
 
     for post_id, post_content in json_data.items():
-         # Check if post_content is suitable for json_normalize (dict or list of dicts)
         if isinstance(post_content, dict):
-            # If it's a single dict, wrap it in a list for normalize
              normalize_input = [post_content]
         elif isinstance(post_content, list):
-             # If it's already a list (less likely based on example, but possible)
-             normalize_input = post_content
+             normalize_input = post_content # Allow list of summaries per post ID if structure varies
         else:
-             continue # Skip if not a dict or list
+             continue
 
-        if normalize_input: # Ensure we have something to process
+        if normalize_input:
             try:
                 summary_df_chunk = pd.json_normalize(normalize_input, sep='_')
                 summary_df_chunk['post_id'] = post_id
                 # Handle potential list/dict types after normalize if necessary
                 for col in summary_df_chunk.columns:
-                    # Check a sample for performance
                     sample_size = min(100, len(summary_df_chunk[col]))
                     if sample_size > 0 and summary_df_chunk[col].iloc[:sample_size].apply(lambda x: isinstance(x, (list, dict))).any():
                         try:
                             summary_df_chunk[col] = summary_df_chunk[col].astype(str) # Convert complex types to string
                         except Exception:
-                            pass # Ignore conversion errors for specific columns
+                            pass
                 chunk_dicts = summary_df_chunk.to_dict(orient='records')
                 all_summaries_list.extend(chunk_dicts)
             except Exception as e:
@@ -323,14 +360,14 @@ def extract_data(data_dir):
     member_feeds_base_path = os.path.join(output_dir, 'member_feeds')
     conversations_base_path = os.path.join(output_dir, 'conversations') # Convo metadata
     messages_base_path = os.path.join(output_dir, 'member_messages') # Actual messages
-    # NEW output paths
     post_comments_base_path = os.path.join(output_dir, 'post_comments')
     post_reactions_base_path = os.path.join(output_dir, 'post_reactions')
     post_seen_base_path = os.path.join(output_dir, 'post_seen')
     post_summaries_base_path = os.path.join(output_dir, 'post_summaries')
+    member_events_base_path = os.path.join(output_dir, 'member_events') # <<< NEW output path for events
 
 
-    # --- Load initial static groups and members data (same as before) ---
+    # --- Load initial static groups and members data (Same as before) ---
     print("Reading initial groups and members data...")
     groups_only_data_path = os.path.join(data_dir, 'groups.json')
     members_only_data_path = os.path.join(data_dir, 'members.json')
@@ -338,10 +375,9 @@ def extract_data(data_dir):
     if os.path.exists(groups_only_data_path):
         try:
             with open(groups_only_data_path, 'r', encoding='utf-8') as f: groups_only_data = json.load(f)
-            # Normalize static data too, handling potential non-list input
             if isinstance(groups_only_data, list):
                 groups_static_df = pd.json_normalize(groups_only_data)
-            elif isinstance(groups_only_data, dict): # Handle case where it might be {id: data}
+            elif isinstance(groups_only_data, dict):
                  groups_static_df = pd.DataFrame.from_dict(groups_only_data, orient='index').reset_index().rename(columns={'index': 'id'})
         except Exception as e: print(f"Warning: Could not read/parse {groups_only_data_path}: {e}")
     else: print(f"Warning: {groups_only_data_path} not found.")
@@ -363,7 +399,7 @@ def extract_data(data_dir):
             if "members" in members_only_data and isinstance(members_only_data["members"], list):
                 current_members_df = pd.json_normalize(members_only_data["members"])
                 if not current_members_df.empty and 'id' in current_members_df.columns:
-                    current_members_df = current_members_df[~current_members_df['id'].isin(admin_ids)] # Exclude admins
+                    current_members_df = current_members_df[~current_members_df['id'].isin(admin_ids)]
                     current_members_df["member_type"] = "current"
                     members_dfs.append(current_members_df)
                     processed_ids.update(set(current_members_df['id'].tolist()))
@@ -371,7 +407,7 @@ def extract_data(data_dir):
             if "former_members" in members_only_data and isinstance(members_only_data["former_members"], list):
                 former_members_df = pd.json_normalize(members_only_data["former_members"])
                 if not former_members_df.empty and 'id' in former_members_df.columns:
-                    former_members_df = former_members_df[~former_members_df['id'].isin(processed_ids)] # Exclude admins/current
+                    former_members_df = former_members_df[~former_members_df['id'].isin(processed_ids)]
                     former_members_df["member_type"] = "former"
                     members_dfs.append(former_members_df)
 
@@ -380,24 +416,23 @@ def extract_data(data_dir):
         except Exception as e: print(f"Warning: Could not read/parse {members_only_data_path}: {e}")
     else: print(f"Warning: {members_only_data_path} not found.")
 
-    # --- Initialize Lookups (same as before) ---
+    # --- Initialize Lookups (Same as before) ---
     group_lookup = {}
     member_lookup = {}
     if not groups_static_df.empty and 'id' in groups_static_df.columns:
-        for gid in groups_static_df['id'].dropna().unique(): group_lookup[gid] = {} # Ensure unique IDs
+        for gid in groups_static_df['id'].dropna().unique(): group_lookup[gid] = {}
     if not members_static_df.empty and 'id' in members_static_df.columns:
-         for mid in members_static_df['id'].dropna().unique(): member_lookup[mid] = {} # Ensure unique IDs
+         for mid in members_static_df['id'].dropna().unique(): member_lookup[mid] = {}
 
-    # --- Find and Process JSON files ---
+    # --- Find and Process JSON files (Corrected os.walk logic) ---
     all_json_files = []
     for root, dirs, files in os.walk(data_dir, topdown=True):
-        # Prevent recursion into the output directory
-        dirs[:] = [d for d in dirs if os.path.join(root, d) != output_dir]
+        dirs[:] = [d for d in dirs if os.path.join(root, d) != output_dir] # Exclude output dir
 
         for file in files:
-            # Include *.json files but exclude the static root files
-            if file.endswith('.json') and os.path.join(root, file) not in [groups_only_data_path, members_only_data_path]:
-                 all_json_files.append(os.path.join(root, file))
+            file_full_path = os.path.join(root, file)
+            if file.endswith('.json') and file_full_path not in [groups_only_data_path, members_only_data_path]:
+                 all_json_files.append(file_full_path)
 
     print(f"Found {len(all_json_files)} JSON data files to process.")
     pbar = tqdm(all_json_files, desc="Processing files", unit="file")
@@ -407,13 +442,23 @@ def extract_data(data_dir):
     for file_path in pbar:
         parent_dir = os.path.basename(os.path.dirname(file_path))
         file_name = os.path.basename(file_path)
-        grand_parent_dir = os.path.basename(os.path.dirname(os.path.dirname(file_path))) # For conversation msgs and post-summaries
+        try:
+            # Calculate grand_parent_dir carefully, handling potential root directory cases
+            grand_parent_dir_path = os.path.dirname(os.path.dirname(file_path))
+            # Check if grand_parent_dir_path is the same as data_dir before getting basename
+            if grand_parent_dir_path != data_dir and os.path.exists(grand_parent_dir_path):
+                 grand_parent_dir = os.path.basename(grand_parent_dir_path)
+            else:
+                 grand_parent_dir = None # Or some indicator that it's directly under data_dir
+        except Exception:
+             grand_parent_dir = None # Handle potential errors getting parent dirs
 
         # Determine file type based on directory structure
         parent_dir_type = 'unknown'
         if parent_dir == 'group-data':
             parent_dir_type = 'group-data'
         elif parent_dir == 'member-data':
+             # Files directly under member-data (containing feeds, convos, events)
             parent_dir_type = 'member-data'
         elif parent_dir == 'conversation-messages' and grand_parent_dir == 'member-data':
              parent_dir_type = 'conversation-messages'
@@ -423,14 +468,14 @@ def extract_data(data_dir):
              parent_dir_type = 'post-summaries'
 
 
-        pbar.set_description(f"Processing {parent_dir}/{file_name} (Type: {parent_dir_type})")
+        pbar.set_description(f"Processing {os.path.relpath(file_path, data_dir)} (Type: {parent_dir_type})")
 
         # Initialize lists to hold data extracted *from this file*
-        # These need to be defined before the try block for the finally/del block
         file_group_feeds_list, file_member_feeds_list = [], []
         file_conversations_list, file_messages_list = [], []
         file_comments_list, file_reactions_list, file_seen_list = [], [], []
         file_post_summaries_list = []
+        file_member_events_list = [] # <<< Initialize new list for events
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f: json_data = json.load(f)
@@ -439,7 +484,8 @@ def extract_data(data_dir):
             if parent_dir_type == 'group-data':
                 group_lookup, file_group_feeds_list = process_json_group_data(json_data, group_lookup)
             elif parent_dir_type == 'member-data':
-                member_lookup, file_member_feeds_list, file_conversations_list = process_json_member_data(json_data, member_lookup)
+                # <<< Update call to receive the new events list
+                member_lookup, file_member_feeds_list, file_conversations_list, file_member_events_list = process_json_member_data(json_data, member_lookup)
             elif parent_dir_type == 'conversation-messages':
                 member_lookup, file_messages_list = process_json_member_conversation_data(json_data, member_lookup)
             elif parent_dir_type == 'post-data':
@@ -447,24 +493,26 @@ def extract_data(data_dir):
             elif parent_dir_type == 'post-summaries':
                  file_post_summaries_list = process_json_post_summaries(json_data)
             else:
-                # print(f"  Skipping file from unknown directory structure: {file_path}")
-                pass # Skip unknown types silently or add logging
+                 pass # Skip unknown types silently
 
             # --- Write extracted lists from THIS FILE to Parquet chunks ---
-            # Only increment chunk_counter if data was actually produced and written
             data_written_in_chunk = False
             chunk_suffix = f"_{chunk_counter + 1:06d}.parquet" # Preview next suffix
 
             def write_chunk(data_list, base_path):
                 nonlocal data_written_in_chunk
-                if data_list:
-                    df_chunk = pd.DataFrame(data_list)
-                    df_chunk = optimize_dtypes(df_chunk)
-                    table_chunk = pa.Table.from_pandas(df_chunk, schema=None, preserve_index=False)
-                    pq.write_table(table_chunk, base_path + chunk_suffix)
-                    del df_chunk, table_chunk
-                    data_written_in_chunk = True # Mark that we wrote something
-                    return True
+                if data_list: # Check if the list actually contains data
+                    try:
+                        df_chunk = pd.DataFrame(data_list)
+                        if not df_chunk.empty: # Double check df is not empty
+                            df_chunk = optimize_dtypes(df_chunk)
+                            table_chunk = pa.Table.from_pandas(df_chunk, schema=None, preserve_index=False)
+                            pq.write_table(table_chunk, base_path + chunk_suffix)
+                            del df_chunk, table_chunk
+                            data_written_in_chunk = True # Mark that we wrote something
+                            return True
+                    except Exception as write_err:
+                        print(f"\n  Error writing chunk to {base_path + chunk_suffix}: {write_err}")
                 return False
 
             # Write chunks for each data type if list is not empty
@@ -476,6 +524,7 @@ def extract_data(data_dir):
             write_chunk(file_reactions_list, post_reactions_base_path)
             write_chunk(file_seen_list, post_seen_base_path)
             write_chunk(file_post_summaries_list, post_summaries_base_path)
+            write_chunk(file_member_events_list, member_events_base_path) # <<< Write events chunk
 
             if data_written_in_chunk:
                 chunk_counter += 1 # Increment only if data was written
@@ -485,55 +534,74 @@ def extract_data(data_dir):
         except Exception as e: print(f"\nError processing file {file_path}: {e}")
         finally:
             # Clean up memory regardless of success or failure inside the loop
-            del json_data # Delete loaded json data
+            if 'json_data' in locals(): del json_data
             # Ensure all lists created for the file are deleted
             del file_group_feeds_list, file_member_feeds_list
             del file_conversations_list, file_messages_list
             del file_comments_list, file_reactions_list, file_seen_list
             del file_post_summaries_list
-            gc.collect() # Force garbage collection more aggressively
+            del file_member_events_list # <<< Clean up event list
+            gc.collect() # Force garbage collection
 
     pbar.close()
     if chunk_counter == 0: print("Warning: No data chunks were written. Check input data and directory structure.")
     print(f"File processing complete! {chunk_counter} data chunks written.")
 
-    # --- Finalize and Save groups_df and members_df (same as before) ---
+    # --- Finalize and Save groups_df and members_df (Same as before) ---
     print("Finalizing and saving groups and members data...")
-    # Convert lookups to DataFrames
     groups_dynamic_df = pd.DataFrame.from_dict(group_lookup, orient='index')
     groups_dynamic_df.index.name = 'id'; groups_dynamic_df.reset_index(inplace=True)
     members_dynamic_df = pd.DataFrame.from_dict(member_lookup, orient='index')
     members_dynamic_df.index.name = 'id'; members_dynamic_df.reset_index(inplace=True)
 
-    # Merge static and dynamic data
+    # Merge static and dynamic data (robust merge)
     groups_final_df = pd.DataFrame()
-    if not groups_static_df.empty and not groups_dynamic_df.empty and 'id' in groups_static_df.columns and 'id' in groups_dynamic_df.columns:
-        try: # Align ID types for merge
-            common_type = pd.api.types.infer_dtype(pd.concat([groups_static_df['id'], groups_dynamic_df['id']]).dropna())
-            if common_type != 'mixed' and common_type != 'unknown':
-                 groups_static_df['id'] = groups_static_df['id'].astype(common_type)
-                 groups_dynamic_df['id'] = groups_dynamic_df['id'].astype(common_type)
-            groups_final_df = pd.merge(groups_static_df, groups_dynamic_df, on='id', how='outer')
-        except Exception as e:
-             print(f"Warning: Could not merge groups static/dynamic data cleanly: {e}. Using dynamic data.")
-             groups_final_df = groups_dynamic_df # Fallback
-    elif not groups_dynamic_df.empty: groups_final_df = groups_dynamic_df
-    elif not groups_static_df.empty: groups_final_df = groups_static_df
+    try:
+        if not groups_static_df.empty:
+            if not groups_dynamic_df.empty and 'id' in groups_static_df.columns and 'id' in groups_dynamic_df.columns:
+                 # Attempt to align ID types before merge
+                 try:
+                     id_col_static_type = groups_static_df['id'].dropna().infer_objects().dtype
+                     id_col_dynamic_type = groups_dynamic_df['id'].dropna().infer_objects().dtype
+                     if id_col_static_type == id_col_dynamic_type:
+                         pass # Types match, proceed
+                     else: # Attempt conversion if types differ (e.g., int vs object/string)
+                          groups_static_df['id'] = groups_static_df['id'].astype(str)
+                          groups_dynamic_df['id'] = groups_dynamic_df['id'].astype(str)
+                 except Exception:
+                      print("Warning: Could not reliably align group ID types for merging. Converting IDs to string.")
+                      groups_static_df['id'] = groups_static_df['id'].astype(str)
+                      groups_dynamic_df['id'] = groups_dynamic_df['id'].astype(str)
+
+                 groups_final_df = pd.merge(groups_static_df, groups_dynamic_df, on='id', how='outer')
+            else: # Only static exists
+                groups_final_df = groups_static_df
+        elif not groups_dynamic_df.empty: # Only dynamic exists
+            groups_final_df = groups_dynamic_df
+    except Exception as e: print(f"Error merging groups data: {e}")
 
     members_final_df = pd.DataFrame()
-    if not members_static_df.empty and not members_dynamic_df.empty and 'id' in members_static_df.columns and 'id' in members_dynamic_df.columns:
-        try: # Align ID types for merge
-            common_type = pd.api.types.infer_dtype(pd.concat([members_static_df['id'], members_dynamic_df['id']]).dropna())
-            if common_type != 'mixed' and common_type != 'unknown':
-                 members_static_df['id'] = members_static_df['id'].astype(common_type)
-                 members_dynamic_df['id'] = members_dynamic_df['id'].astype(common_type)
-            members_final_df = pd.merge(members_static_df, members_dynamic_df, on='id', how='outer')
-        except Exception as e:
-            print(f"Warning: Could not merge members static/dynamic data cleanly: {e}. Using dynamic data.")
-            members_final_df = members_dynamic_df # Fallback
-    elif not members_dynamic_df.empty: members_final_df = members_dynamic_df
-    elif not members_static_df.empty: members_final_df = members_static_df
+    try:
+        if not members_static_df.empty:
+            if not members_dynamic_df.empty and 'id' in members_static_df.columns and 'id' in members_dynamic_df.columns:
+                 # Align ID types
+                 try:
+                     id_col_static_type = members_static_df['id'].dropna().infer_objects().dtype
+                     id_col_dynamic_type = members_dynamic_df['id'].dropna().infer_objects().dtype
+                     if id_col_static_type != id_col_dynamic_type:
+                          members_static_df['id'] = members_static_df['id'].astype(str)
+                          members_dynamic_df['id'] = members_dynamic_df['id'].astype(str)
+                 except Exception:
+                     print("Warning: Could not reliably align member ID types for merging. Converting IDs to string.")
+                     members_static_df['id'] = members_static_df['id'].astype(str)
+                     members_dynamic_df['id'] = members_dynamic_df['id'].astype(str)
 
+                 members_final_df = pd.merge(members_static_df, members_dynamic_df, on='id', how='outer')
+            else: # Only static
+                members_final_df = members_static_df
+        elif not members_dynamic_df.empty: # Only dynamic
+            members_final_df = members_dynamic_df
+    except Exception as e: print(f"Error merging members data: {e}")
 
     # Save final group/member files
     if not groups_final_df.empty:
@@ -550,7 +618,6 @@ def extract_data(data_dir):
             members_final_df.to_parquet(members_final_path, engine='pyarrow', index=False)
             print(f"Saved final members data to {members_final_path}")
         except Exception as e: print(f"Error saving final members data: {e}")
-
     else: print("No final members data to save.")
 
     # Final cleanup
@@ -560,16 +627,17 @@ def extract_data(data_dir):
 
     print(f"\nData extraction process finished!")
     print(f"Output saved in: {output_dir}")
-    print("Individual data types (feeds, messages, posts, etc.) are saved as chunked Parquet files.")
+    print("Individual data types (feeds, messages, posts, events, etc.) are saved as chunked Parquet files.")
     print(f"Example: Read all group feeds using: pd.read_parquet('{os.path.join(output_dir, 'group_feeds_*.parquet')}')")
     print(f"Example: Read all post comments using: pd.read_parquet('{os.path.join(output_dir, 'post_comments_*.parquet')}')")
+    print(f"Example: Read all member events using: pd.read_parquet('{os.path.join(output_dir, 'member_events_*.parquet')}')") # <<< Added example for events
     print("Consider using Dask or Spark for reading large partitioned datasets.")
 
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
     # >>>>> IMPORTANT: SET YOUR DATA DIRECTORY HERE <<<<<
-    data_dir = "Bunnings_v2" # <--- EXAMPLE: Set your *root* input directory containing group-data, member-data, post-data etc.
+    data_dir = "Bunnings_v2" # <--- EXAMPLE: Set your *root* input directory
 
     if not os.path.isdir(data_dir):
         print(f"Error: Directory not found: {data_dir}")
